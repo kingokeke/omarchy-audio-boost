@@ -1,0 +1,181 @@
+#!/bin/bash
+
+# Volume keys with configurable boost above 100%.
+#
+# This is a user-owned replacement for the packaged
+# omarchy-audio-output-volume. The packaged script clamps at 100%, so the media
+# keys are re-bound to this copy in ~/.config/hypr/bindings.lua.
+#
+# Settings are read from this widget's inline entry in
+# ~/.config/omarchy/shell.json (id io.github.kingokeke.audio-boost).
+# Set OMARCHY_AUDIO_BOOST_ID when using a fork with a different plugin id.
+#   maxVolume      100..200   default 150
+#   step           1..10      default 5
+#   boostEnabled   boolean    default true
+#   warnOnBoost    boolean    default true
+#   overdriveColor #RRGGBB    default #ff5555
+#
+# Actions:
+#   raise | lower | mute-toggle | reset | max | toggle-boost | +N | -N
+
+set -uo pipefail
+
+action="${1:-}"
+
+if [[ -z $action ]]; then
+  echo "Usage: omarchy-volume-boost <raise|lower|mute-toggle|reset|max|toggle-boost|+N|-N>" >&2
+  exit 1
+fi
+
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+plugin_id="${OMARCHY_AUDIO_BOOST_ID:-io.github.kingokeke.audio-boost}"
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+state_file="$runtime_dir/omarchy-volume-boost-last.state"
+
+entry=$(jq -c --arg id "$plugin_id" \
+  '.. | objects | select(.id? == $id) | .' "$config_file" 2>/dev/null | head -n 1)
+if [[ -z $entry ]]; then
+  # Fallback for forks/renamed installs: use any entry that carries the
+  # boost settings. The published id always wins when it is present.
+  entry=$(jq -c '.. | objects | select(has("maxVolume") and has("overdriveColor")) | .' \
+    "$config_file" 2>/dev/null | head -n 1)
+fi
+[[ -n $entry ]] || entry='{}'
+
+get_field() {
+  local key="$1" fallback="$2" value
+  value=$(jq -r --arg k "$key" --arg d "$fallback" \
+    'if has($k) then .[$k] else $d end' <<<"$entry" 2>/dev/null)
+  if [[ -z $value || $value == "null" ]]; then
+    printf '%s\n' "$fallback"
+  else
+    printf '%s\n' "$value"
+  fi
+}
+
+max_volume=$(get_field maxVolume 150)
+step=$(get_field step 5)
+boost_enabled=$(get_field boostEnabled true)
+warn_on_boost=$(get_field warnOnBoost true)
+overdrive_color=$(get_field overdriveColor '#ff5555')
+
+# Normalise anything a hand-edited config might contain.
+[[ $max_volume =~ ^[0-9]+$ ]] || max_volume=150
+((max_volume >= 100)) || max_volume=100
+((max_volume <= 200)) || max_volume=200
+[[ $step =~ ^[0-9]+$ ]] || step=5
+((step >= 1)) || step=1
+((step <= 10)) || step=10
+[[ $boost_enabled == "true" ]] || boost_enabled=false
+[[ $warn_on_boost == "true" ]] || warn_on_boost=false
+[[ $overdrive_color =~ ^#[0-9a-fA-F]{6}$ ]] || overdrive_color="#ff5555"
+
+effective_max=$max_volume
+[[ $boost_enabled == "true" ]] || effective_max=100
+
+sink="$(omarchy-audio-output-sink)"
+if [[ -z $sink ]]; then
+  echo "Could not resolve an audio sink to control." >&2
+  exit 1
+fi
+
+volume_percent() {
+  pactl get-sink-volume "$sink" 2>/dev/null |
+    awk 'NR == 1 {
+      for (i = 1; i <= NF; i++)
+        if ($i ~ /%$/) {sub("%", "", $i); print $i; exit}
+    }'
+}
+
+volume_muted() {
+  [[ $(pactl get-sink-mute "$sink" 2>/dev/null) == *yes ]]
+}
+
+show_osd() {
+  local percent="$1" icon="volume-high" payload
+  if volume_muted || ((percent == 0)); then
+    icon="volume-muted"
+  fi
+  payload=$(jq -cn \
+    --arg icon "$icon" \
+    --argjson value "$percent" \
+    --argjson max "$effective_max" \
+    --arg text "${percent}%" \
+    --arg color "$overdrive_color" \
+    '{icon:$icon,value:$value,max:$max,progressText:$text,overdriveColor:$color,overdriveFrom:100}')
+  # The packaged omarchy-osd accepts only -i/-p, so send the full payload
+  # directly to the OSD IPC. Fall back to the packaged script if that fails
+  # (e.g. after removing rex.osd, the stock OSD ignores the extra fields).
+  omarchy-shell -q osd show "$payload" >/dev/null 2>&1 ||
+    omarchy-osd -i "$icon" -p "$percent" >/dev/null 2>&1 || true
+}
+
+notify_first_boost() {
+  local previous="$1" next="$2" marker
+  [[ $warn_on_boost == "true" ]] || return 0
+  ((previous <= 100 && next > 100)) || return 0
+  marker="$runtime_dir/omarchy-volume-boost-notified"
+  [[ -e $marker ]] && return 0
+  : >"$marker"
+  omarchy-notification-send -g 󰕾 "Volume boost" \
+    "Above 100% can clip. Middle-click the speaker or press b in the panel to drop back to 100%." \
+    >/dev/null 2>&1 || true
+}
+
+if [[ $action == "mute-toggle" ]]; then
+  debounce_file="$runtime_dir/omarchy-volume-boost-mute-toggle.last"
+  now=$(date +%s%3N)
+  last=0
+  [[ -r $debounce_file ]] && read -r last <"$debounce_file" || true
+  if ((now - last < 250)); then
+    exit 0
+  fi
+  printf '%s\n' "$now" >"$debounce_file"
+
+  pactl set-sink-mute "$sink" toggle
+  show_osd "$(volume_percent)"
+  exit 0
+fi
+
+current=$(volume_percent)
+if [[ -z $current ]]; then
+  echo "Could not read volume for $sink." >&2
+  exit 1
+fi
+
+case "$action" in
+  raise) target=$((current + step)) ;;
+  lower) target=$((current - step)) ;;
+  reset) target=100 ;;
+  max) target=$effective_max ;;
+  toggle-boost)
+    if ((current > 100)); then
+      printf '%s\n' "$current" >"$state_file"
+      target=100
+    else
+      target=$effective_max
+      if [[ -r $state_file ]]; then
+        saved=""
+        read -r saved <"$state_file" || true
+        if [[ $saved =~ ^[0-9]+$ ]] && ((saved > 100)); then
+          target=$saved
+        fi
+      fi
+    fi
+    ;;
+  +[0-9]*) target=$((current + ${action#+})) ;;
+  -[0-9]*) target=$((current - ${action#-})) ;;
+  *)
+    echo "Unknown volume action: $action" >&2
+    exit 1
+    ;;
+esac
+
+((target > effective_max)) && target=$effective_max
+((target < 0)) && target=0
+
+pactl set-sink-mute "$sink" 0
+pactl set-sink-volume "$sink" "${target}%"
+
+notify_first_boost "$current" "$target"
+show_osd "$target"

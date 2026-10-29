@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kingokeke.audio-boost",
+  "name": "Audio Boost",
+  "version": "1.0.0",
+  "author": "kingokeke",
+  "license": "MIT",
+  "description": "Audio panel and OSD with configurable volume boost above 100% (default 150%), two-tone bars, and per-app boost.",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "panel": "Osd.qml"
+  },
+  "barWidget": {
+    "displayName": "Audio Boost",
+    "description": "Volume slider with configurable boost above 100%, output picker, per-app mixer, and two-tone OSD.",
+    "category": "Audio",
+    "aliases": [
+      "audio",
+      "volume",
+      "boost",
+      "osd"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "maxVolume": 150,
+      "step": 5,
+      "showPercent": true,
+      "warnOnBoost": true,
+      "boostEnabled": true,
+      "overdriveColor": "#ff5555"
+    },
+    "schema": [
+      {
+        "key": "maxVolume",
+        "type": "integer",
+        "label": "Maximum volume (%)",
+        "min": 100,
+        "max": 200,
+        "step": 5,
+        "defaultValue": 150
+      },
+      {
+        "key": "step",
+        "type": "integer",
+        "label": "Volume step (%)",
+        "min": 1,
+        "max": 10,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "showPercent",
+        "type": "boolean",
+        "label": "Show percentage in bar",
+        "defaultValue": true
+      },
+      {
+        "key": "warnOnBoost",
+        "type": "boolean",
+        "label": "Warn above 100%",
+        "defaultValue": true
+      },
+      {
+        "key": "boostEnabled",
+        "type": "boolean",
+        "label": "Allow boost above 100%",
+        "defaultValue": true
+      },
+      {
+        "key": "overdriveColor",
+        "type": "string",
+        "label": "Boost color (hex)",
+        "description": "Color above 100% in the OSD and panel slider, e.g. #ff5555",
+        "defaultValue": "#ff5555"
+      }
+    ]
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.osd"
+  }
+}
